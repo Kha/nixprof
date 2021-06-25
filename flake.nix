@@ -8,7 +8,7 @@
     with import nixpkgs { inherit system; };
     rec {
       packages.nixprof = python3Packages.buildPythonApplication {
-        buildInputs = with python3Packages; [ networkx pydot ];
+        propagatedBuildInputs = with python3Packages; [ networkx pydot click moreutils ];
         name = "nixprof";
         src = ./.;
       };

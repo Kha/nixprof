@@ -5,6 +5,6 @@ setuptools.setup(
     packages=["."],
     entry_points='''
         [console_scripts]
-        nixprof=nixprof:main
+        nixprof=nixprof:nixprof
     '''
 )
