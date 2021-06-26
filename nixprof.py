@@ -4,10 +4,10 @@ from collections import defaultdict
 import heapq
 import re
 import os
-from typing import Any, Dict, Union
+import json
+from typing import TextIO, Union
 import networkx
 import click
-from networkx.drawing.nx_pydot import write_dot
 
 def simulate(g: networkx.DiGraph, max_nproc: Union[int, None]) -> networkx.DiGraph:
     g = g.copy()
@@ -37,6 +37,18 @@ def simulate(g: networkx.DiGraph, max_nproc: Union[int, None]) -> networkx.DiGra
 
     return g
 
+def write_chrome_trace(g: networkx.DiGraph, out: TextIO):
+    trace_events = [{
+        "name": d["drv_name"],
+        "cat": "build",
+        "ph": "X",
+        "ts": d["start"] * 1000000,
+        "dur": d["time"] * 1000000,
+        "pid": 0,
+        "tid": d["proc"]
+    } for _, d in g.nodes(data=True)]
+    json.dump({"traceEvents": trace_events}, out)
+
 @click.group()
 def nixprof():
     pass
@@ -48,26 +60,30 @@ def record(cmd, out):
     os.system(f"\\time {' '.join(cmd)} --debug 2>&1 | ts -s -m \"[%.s]\" > {out}")
 
 DOTFILE = "nixprof.dot"
+CHROMEFILE = "nixprof.trace_event"
 
 @nixprof.command()
 @click.option("-i", "--in", "input", default="nixprof.log", help="log input filename", type=click.File('r'))
-@click.option("-t", "--tred", help="remove transitive edges", is_flag=True)
+@click.option("-t", "--tred", help="remove transitive edges (can speed up and declutter dot graph display)", is_flag=True)
 @click.option("-p", "--print-crit-path", help="print critical (longest) path", is_flag=True)
 @click.option("-a", "--print-avg-crit", help="print average contribution to critical paths", is_flag=True)
 @click.option("-s", "--print-sim-times", help="print simulated build times by processor count up to optimal count", is_flag=True)
 @click.option("-d", "--save-dot", is_flag=False, flag_value=DOTFILE, help="write dot graph to file", type=click.File('w'))
+@click.option("-c", "--save-chrome-trace", is_flag=False, flag_value=CHROMEFILE, help="write `chrome://tracing`'s `trace_event` format to file. When combined with `-s`, also write simulated traces to files with processor count as suffix.")
 @click.option("--all", help="print all analyses, write all output files", is_flag=True)
 @click.option("--lean", is_flag=True, hidden=True)
-def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, all, lean):
+def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, lean):
     log = input.read()
     g = networkx.DiGraph(rankdir="BT")
-    stops = {}
-    for stop, drv in re.findall(f"\[(.*)\] building of '(.*)!.*' from .drv file: build done", log):
-        stops[drv] = float(stop)
     for start, drv in re.findall(r"\[([^]]*)\] building '(.*)'...", log):
         name = re.search(r"-(.*)\.drv", drv)[1]
-        start = float(start)
-        g.add_node(drv, drv_name=name, start=start, stop=stops[drv], time=stops[drv] - start)
+        g.add_node(drv, drv_name=name, start=float(start))
+    for stop, drv, uid in re.findall(r"\[([\d.]+)\] building of '([^'!]*)[^:]*: build done.*?uid '(\d+)'", log, re.DOTALL):
+        if drv in g:
+            stop = float(stop)
+            g.nodes[drv]["stop"] = stop
+            g.nodes[drv]["time"] = stop - g.nodes[drv]["start"]
+            g.nodes[drv]["proc"] = uid
     for drv, dep in re.findall(f"building of '(.*)!.*' from .drv file: waitee 'building of '(.*)!.*' from .drv file' done", log):
         if g.has_node(dep):
             g.add_edge(drv, dep)
@@ -80,7 +96,7 @@ def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_d
 
     if lean:
         for u, v in list(g.edges):
-            if "depRoot" in g.nodes[v]["drv_name"]:
+            if v in g and "depRoot" in g.nodes[v]["drv_name"]:
                 networkx.contracted_nodes(g, u, v, self_loops=False, copy=False)
 
     # copy time from nodes to incoming edges for `dag_longest_path`
@@ -125,7 +141,10 @@ def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_d
             opt = ' (opt)' if nproc == nproc_opt else '\t'
             print(f"\t{nproc}{opt}\t{time:.1f}s\t{cum_time/time:.0%}")
 
-    if write_dot or all:
+            if save_chrome_trace or all:
+                write_chrome_trace(gs, open(f"{save_chrome_trace or CHROMEFILE}.{nproc}", 'w'))
+
+    if save_dot or all:
         for u in g.nodes:
             name = g.nodes[u]["drv_name"]
             time = g.nodes[u]["time"]
@@ -134,6 +153,9 @@ def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_d
             g.nodes[u]["shape"] = "box"
 
         networkx.nx_pydot.write_dot(g, save_dot or DOTFILE)
+
+    if save_chrome_trace or all:
+        write_chrome_trace(g, open(save_chrome_trace or CHROMEFILE, 'w'))
 
 if __name__ == '__main__':
     nixprof()
