@@ -87,7 +87,6 @@ def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_d
     for drv, dep in re.findall(f"building of '(.*)!.*' from .drv file: waitee 'building of '(.*)!.*' from .drv file' done", log):
         if g.has_node(dep):
             g.add_edge(drv, dep)
-            g.add_nodes_from
 
     if tred:
         g2: networkx.DiGraph = networkx.transitive_reduction(g)
@@ -96,10 +95,10 @@ def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_d
 
     if lean:
         for u, v in list(g.edges):
-            if v in g and "depRoot" in g.nodes[v]["drv_name"]:
+            if v in g and "depRoot" in v:
                 networkx.contracted_nodes(g, u, v, self_loops=False, copy=False)
 
-    # copy time from nodes to incoming edges for `dag_longest_path`
+    # copy time from nodes to outgoing edges for `dag_longest_path`
     for u, v, data in g.edges(data=True):
         data["time"] = g.nodes[u]["time"]
 
