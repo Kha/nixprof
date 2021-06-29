@@ -3,7 +3,7 @@
 from collections import defaultdict
 import heapq
 import re
-import os
+import subprocess
 import json
 from typing import TextIO, Union
 import networkx
@@ -53,11 +53,13 @@ def write_chrome_trace(g: networkx.DiGraph, out: TextIO):
 def nixprof():
     pass
 
-@nixprof.command()
+@nixprof.command(context_settings=dict(
+    ignore_unknown_options=True,
+))
 @click.option("-o", "--out", default="nixprof.log", help="log output filename")
 @click.argument("cmd", nargs=-1, type=click.UNPROCESSED)
 def record(cmd, out):
-    os.system(f"\\time {' '.join(cmd)} --debug 2>&1 | ts -s -m \"[%.s]\" > {out}")
+    subprocess.run(f"\\time {' '.join(cmd)} --log-format internal-json 2>&1 | ts -s -m \"[%.s]\" > {out}", shell=True, check=True)
 
 DOTFILE = "nixprof.dot"
 CHROMEFILE = "nixprof.trace_event"
@@ -72,21 +74,28 @@ CHROMEFILE = "nixprof.trace_event"
 @click.option("-c", "--save-chrome-trace", is_flag=False, flag_value=CHROMEFILE, help="write `chrome://tracing`'s `trace_event` format to file. When combined with `-s`, also write simulated traces to files with processor count as suffix.")
 @click.option("--all", help="print all analyses, write all output files", is_flag=True)
 @click.option("--lean", is_flag=True, hidden=True)
-def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, lean):
-    log = input.read()
+def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, lean):
     g = networkx.DiGraph(rankdir="BT")
-    for start, drv in re.findall(r"\[([^]]*)\] building '(.*)'...", log):
-        name = re.search(r"-(.*)\.drv", drv)[1]
-        g.add_node(drv, drv_name=name, start=float(start))
-    for stop, drv, uid in re.findall(r"\[([\d.]+)\] building of '([^'!]*)[^:]*: build done.*?uid '(\d+)'", log, re.DOTALL):
-        if drv in g:
-            stop = float(stop)
-            g.nodes[drv]["stop"] = stop
-            g.nodes[drv]["time"] = stop - g.nodes[drv]["start"]
-            g.nodes[drv]["proc"] = uid
-    for drv, dep in re.findall(f"building of '(.*)!.*' from .drv file: waitee 'building of '(.*)!.*' from .drv file' done", log):
-        if g.has_node(dep):
-            g.add_edge(drv, dep)
+    id_to_drv = {}
+    for line in input.readlines():
+        if m := re.match(r"\[([^]]*)\] @nix ", line):
+            time = float(m.group(1))
+            entry = json.loads(line[m.end(0):])
+            if entry["action"] == "start" and entry["type"] == 105:  # 105 = actBuild
+                drv = entry["fields"][0]
+                id_to_drv[entry["id"]] = drv
+                name = re.search(r"-(.*)\.drv", drv)[1]
+                g.add_node(drv, drv_name=name, start=time)
+            elif entry["action"] == "stop":
+                if drv := id_to_drv.get(entry["id"]):
+                    g.nodes[drv]["stop"] = time
+                    g.nodes[drv]["time"] = time - g.nodes[drv]["start"]
+
+    drv_data = json.loads(subprocess.run(["nix", "path-info", "--json", "--derivation"] + list(g), capture_output=True, check=True).stdout)
+    for d in drv_data:
+        for dep in d["references"]:
+            if dep in g:
+                g.add_edge(d["path"], dep)
 
     if tred:
         g2: networkx.DiGraph = networkx.transitive_reduction(g)
@@ -154,7 +163,7 @@ def report(input, tred, print_crit_path, print_avg_crit, print_sim_times, save_d
         networkx.nx_pydot.write_dot(g, save_dot or DOTFILE)
 
     if save_chrome_trace or all:
-        write_chrome_trace(g, open(save_chrome_trace or CHROMEFILE, 'w'))
+        pass #write_chrome_trace(g, open(save_chrome_trace or CHROMEFILE, 'w'))
 
 if __name__ == '__main__':
     nixprof()
