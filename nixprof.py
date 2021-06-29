@@ -9,17 +9,13 @@ from typing import List, TextIO, Union
 import networkx
 import click
 
-def simulate(g: networkx.DiGraph, crit_path: List[str], max_nproc: Union[int, None], keep_start: bool = False) -> networkx.DiGraph:
+def simulate(g: networkx.DiGraph, max_nproc: Union[int, None], keep_start: bool = False) -> networkx.DiGraph:
     g = g.copy()
-    def get_weight(v: str):
-        # prioritize nodes on critical path (so they are all scheduled on thread #0 at least with sufficient processors), then by original
-        # start date (as a tie breaker)
-        return (v not in crit_path, g.nodes[v]["start"])
 
     # task -> remaining dependencies
     outdeg = {v: d for v, d in g.out_degree() if d > 0}
-    # priority queue of tasks
-    ready = [(get_weight(v), v) for v, d in g.out_degree() if d == 0]
+    # priority queue of tasks to be started by start time from log (as a tiebreaker)
+    ready = [(g.nodes[v]["start"], v) for v, d in g.out_degree() if d == 0]
     heapq.heapify(ready)
     # priority queue of currently running tasks by stop time
     running = [(0, None)]
@@ -30,11 +26,11 @@ def simulate(g: networkx.DiGraph, crit_path: List[str], max_nproc: Union[int, No
             for v in g.predecessors(u):
                 outdeg[v] -= 1
                 if outdeg[v] == 0:
-                    heapq.heappush(ready, (get_weight(v), v))
+                    heapq.heappush(ready, (g.nodes[v]["start"], v))
         free_procs = set(range(max_nproc or len(running) + len(ready))) - set(g.nodes[v]["proc"] for _, v in running)
         for proc in sorted(list(free_procs))[:len(ready)]:
             if keep_start:
-                if running and ready[0][0][1] > running[0][0]:
+                if running and ready[0][0] > running[0][0]:
                     break
             _, v = heapq.heappop(ready)
             g.nodes[v]["proc"] = proc
@@ -45,16 +41,20 @@ def simulate(g: networkx.DiGraph, crit_path: List[str], max_nproc: Union[int, No
 
     return g
 
-def write_chrome_trace(g: networkx.DiGraph, out: TextIO):
-    trace_events = [{
-        "name": d["drv_name"],
-        "cat": "build",
-        "ph": "X",
-        "ts": d["start"] * 1000000,
-        "dur": d["time"] * 1000000,
-        "pid": 0,
-        "tid": d["proc"]
-    } for _, d in g.nodes(data=True)]
+def write_chrome_trace(g: networkx.DiGraph, out: TextIO, crit_path: List[str]):
+    def mk_event(d, tid=None):
+        return {
+            "name": d["drv_name"],
+            "cat": "build",
+            "ph": "X",
+            "ts": d["start"] * 1000000,
+            "dur": d["time"] * 1000000,
+            "pid": 0,
+            "tid": d["proc"] + 1 if tid is None else tid
+        }
+    trace_events = [{"name": "thread_name", "ph": "M", "pid":0, "tid":0, "args": {"name": "critical path"}}] +\
+      [mk_event(d) for _, d in g.nodes(data=True)] +\
+      [mk_event(g.nodes[v], tid=0) for v in crit_path]
     json.dump({"traceEvents": trace_events}, out)
 
 @click.group()
@@ -149,16 +149,16 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         print("Simulated build times by processor count")
         print("\t#CPUs\t\ttime\tCPU% [avg]")
         cum_time = sum(d["time"] for _, d in g.nodes(data=True))
-        g_opt = simulate(g, crit_path, max_nproc=None)
+        g_opt = simulate(g, max_nproc=None)
         nproc_opt = max(d["proc"] for _, d in g_opt.nodes(data=True))
         for nproc in [2**i for i in range(8) if 2**i < nproc_opt] + [nproc_opt]:
-            gs = simulate(g, crit_path, max_nproc=nproc)
+            gs = simulate(g, max_nproc=nproc)
             time = max(d["stop"] for _, d in gs.nodes(data=True))
             opt = ' (opt)' if nproc == nproc_opt else '\t'
             print(f"\t{nproc}{opt}\t{time:.1f}s\t{cum_time/time:.0%}")
 
             if save_chrome_trace or all:
-                write_chrome_trace(gs, open(f"{save_chrome_trace or CHROMEFILE}.{nproc}", 'w'))
+                write_chrome_trace(gs, open(f"{save_chrome_trace or CHROMEFILE}.{nproc}", 'w'), crit_path)
 
     if save_dot or all:
         for u in g.nodes:
@@ -171,8 +171,8 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         networkx.nx_pydot.write_dot(g, save_dot or DOTFILE)
 
     if save_chrome_trace or all:
-        g_sim = simulate(g, crit_path, max_nproc=None, keep_start=True)
-        write_chrome_trace(g_sim, open(save_chrome_trace or CHROMEFILE, 'w'))
+        g_sim = simulate(g, max_nproc=None, keep_start=True)
+        write_chrome_trace(g_sim, open(save_chrome_trace or CHROMEFILE, 'w'), crit_path)
 
 if __name__ == '__main__':
     nixprof()
