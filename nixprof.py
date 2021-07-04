@@ -153,19 +153,22 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         print(tabulate(tab, headers=["time", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
         print()
 
-    if print_sim_times:
-        print("Simulated build times by processor count")
+    if print_sim_times or all:
+        print("Simulated build times by processor count up optimal power of two")
         cum_time = sum(d["time"] for _, d in g.nodes(data=True))
-        g_opt = simulate(g, max_nproc=None)
-        nproc_opt = max(d["proc"] for _, d in g_opt.nodes(data=True))
         tab = []
-        for nproc in [2**i for i in range(8) if 2**i < nproc_opt] + [nproc_opt]:
+        nproc = 1
+        prev_time = None
+        while True:
             gs = simulate(g, max_nproc=nproc)
             time = max(d["stop"] for _, d in gs.nodes(data=True))
+            if time == prev_time:
+                break
+            prev_time = time
             tab.append((nproc, time, cum_time / time))
-
             if save_chrome_trace or all:
                 write_chrome_trace(gs, open(f"{save_chrome_trace or CHROMEFILE}.{nproc}", 'w'), crit_path)
+            nproc *= 2
         print(tabulate(tab, headers=["#CPUs", "time", "CPU% [avg]"], floatfmt=["", ".1f", ".0%"]))
         print()
 
