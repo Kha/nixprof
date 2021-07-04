@@ -8,6 +8,7 @@ import json
 from typing import List, TextIO, Union
 import networkx
 import click
+from tabulate import tabulate
 
 def simulate(g: networkx.DiGraph, max_nproc: Union[int, None], keep_start: bool = False) -> networkx.DiGraph:
     g = g.copy()
@@ -124,10 +125,13 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         print("Critical path")
         max_time = sum([g.nodes[u]["time"] for u in crit_path])
         cum_time = 0
+        tab = []
         for u in crit_path:
             time = g.nodes[u]["time"]
             cum_time += time
-            print("\t{:.1f}s\t{:.1%}\t{:.1f}s\t{:.1%}\t{}".format(time, time / max_time, cum_time, cum_time / max_time, g.nodes[u]["drv_name"]))
+            tab.append((time, time / max_time, cum_time, cum_time / max_time, g.nodes[u]["drv_name"]))
+        print(tabulate(tab, headers=["time", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
+        print()
 
     if print_avg_crit or all:
         avg_contrib = defaultdict(lambda: 0)
@@ -139,26 +143,31 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         print("Average contribution to critical paths")
         total_contrib = sum(avg_contrib.values())
         cum_contrib = 0
+        tab = []
         for u, t in list(sorted(avg_contrib.items(), key=(lambda p: p[1]), reverse=True)):
             if t < 0.05:
+                tab.append((0, 0, total_contrib, 1, "[total]"))
                 break
             cum_contrib += t
-            print("\t{:.1f}s\t{:.1%}\t{:.1f}s\t{:.1%}\t{}".format(t, t / total_contrib, cum_contrib, cum_contrib / total_contrib, g.nodes[u]["drv_name"]))
+            tab.append((t, t / total_contrib, cum_contrib, cum_contrib / total_contrib, g.nodes[u]["drv_name"]))
+        print(tabulate(tab, headers=["time", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
+        print()
 
     if print_sim_times:
         print("Simulated build times by processor count")
-        print("\t#CPUs\t\ttime\tCPU% [avg]")
         cum_time = sum(d["time"] for _, d in g.nodes(data=True))
         g_opt = simulate(g, max_nproc=None)
         nproc_opt = max(d["proc"] for _, d in g_opt.nodes(data=True))
+        tab = []
         for nproc in [2**i for i in range(8) if 2**i < nproc_opt] + [nproc_opt]:
             gs = simulate(g, max_nproc=nproc)
             time = max(d["stop"] for _, d in gs.nodes(data=True))
-            opt = ' (opt)' if nproc == nproc_opt else '\t'
-            print(f"\t{nproc}{opt}\t{time:.1f}s\t{cum_time/time:.0%}")
+            tab.append((nproc, time, cum_time / time))
 
             if save_chrome_trace or all:
                 write_chrome_trace(gs, open(f"{save_chrome_trace or CHROMEFILE}.{nproc}", 'w'), crit_path)
+        print(tabulate(tab, headers=["#CPUs", "time", "CPU% [avg]"], floatfmt=["", ".1f", ".0%"]))
+        print()
 
     if save_dot or all:
         for u in g.nodes:
