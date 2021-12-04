@@ -65,9 +65,10 @@ def nixprof():
 @nixprof.command(context_settings=dict(
     ignore_unknown_options=True,
 ))
-@click.option("-o", "--out", default="nixprof.log", help="log output filename")
+@click.option("-o", "--out", default="nixprof.log", help="output filename", show_default=True)
 @click.argument("cmd", nargs=-1, type=click.UNPROCESSED)
 def record(cmd, out):
+    """Record timings of a `nix-build`/`nix build` invocation."""
     subprocess.run(f"\\time {' '.join(cmd)} --log-format internal-json 2>&1 | ts -s -m \"[%.s]\" > {out}", shell=True, check=True)
 
 DOTFILE = "nixprof.dot"
@@ -82,8 +83,9 @@ CHROMEFILE = "nixprof.trace_event"
 @click.option("-d", "--save-dot", is_flag=False, flag_value=DOTFILE, help="write dot graph to file", type=click.File('w'))
 @click.option("-c", "--save-chrome-trace", is_flag=False, flag_value=CHROMEFILE, help="write `chrome://tracing`'s `trace_event` format to file. When combined with `-s`, also write simulated traces to files with processor count as suffix.")
 @click.option("--all", help="print all analyses, write all output files", is_flag=True)
-@click.option("--lean", is_flag=True, hidden=True)
-def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, lean):
+@click.option("--merge-into-pred", help="for each derivation with exactly one predecessor (dependency) and whose name matches the given regex, merge build time and dependents into that predecessor")
+@click.option("--merge-into-succ", help="for each derivation with exactly one successor (dependent) and whose name matches the given regex, merge build time and dependencies into that successor")
+def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, merge_into_pred, merge_into_succ):
     g = networkx.DiGraph(rankdir="BT")
     id_to_drv = {}
     for line in input.readlines():
@@ -100,7 +102,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
                     g.nodes[drv]["stop"] = time
                     g.nodes[drv]["time"] = time - g.nodes[drv]["start"]
 
-    drv_data = json.loads(subprocess.run(["nix", "path-info", "--json", "--derivation"] + list(g), capture_output=True, check=True).stdout)
+    drv_data = json.loads(subprocess.run(["nix", "--experimental-features", "nix-command", "path-info", "--json", "--derivation"] + list(g), capture_output=True, check=True).stdout)
     for d in drv_data:
         for dep in d["references"]:
             if dep in g:
@@ -111,10 +113,29 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         g2.update(nodes=g.nodes(data=True))
         g = g2
 
-    if lean:
-        for u, v in list(g.edges):
-            if v in g and "depRoot" in v:
-                networkx.contracted_nodes(g, u, v, self_loops=False, copy=False)
+    if merge_into_pred:
+        pat = re.compile(merge_into_pred)
+        for drv in list(g):
+            if pat.search(drv):
+                # uhh, maybe I should really invert the graph...
+                preds = list(g.successors(drv))
+                if len(preds) == 1:
+                    networkx.contracted_nodes(g, preds[0], drv, self_loops=False, copy=False)
+                    del g.nodes[preds[0]]["contraction"]
+
+    if merge_into_succ:
+        pat = re.compile(merge_into_succ)
+        for drv in list(g):
+            if pat.search(drv):
+                succs = list(g.predecessors(drv))
+                if len(succs) == 1:
+                    networkx.contracted_nodes(g, succs[0], drv, self_loops=False, copy=False)
+                    del g.nodes[succs[0]]["contraction"]
+
+    if tred:
+        g2: networkx.DiGraph = networkx.transitive_reduction(g)
+        g2.update(nodes=g.nodes(data=True))
+        g = g2
 
     # copy time from nodes to outgoing edges for `dag_longest_path`
     for u, v, data in g.edges(data=True):
@@ -130,7 +151,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
             time = g.nodes[u]["time"]
             cum_time += time
             tab.append((time, time / max_time, cum_time, cum_time / max_time, g.nodes[u]["drv_name"]))
-        print(tabulate(tab, headers=["time", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
+        print(tabulate(tab, headers=["time [s]", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
         print()
 
     if print_avg_crit or all:
@@ -150,7 +171,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
                 break
             cum_contrib += t
             tab.append((t, t / total_contrib, cum_contrib, cum_contrib / total_contrib, g.nodes[u]["drv_name"]))
-        print(tabulate(tab, headers=["time", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
+        print(tabulate(tab, headers=["time [s]", "", "[cum]", "", "drv"], floatfmt=[".1f", ".1%", ".1f", ".1%"]))
         print()
 
     if print_sim_times or all:
@@ -169,7 +190,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
             if save_chrome_trace or all:
                 write_chrome_trace(gs, open(f"{save_chrome_trace or CHROMEFILE}.{nproc}", 'w'), crit_path)
             nproc *= 2
-        print(tabulate(tab, headers=["#CPUs", "time", "CPU% [avg]"], floatfmt=["", ".1f", ".0%"]))
+        print(tabulate(tab, headers=["#CPUs", "time [s]", "CPU% [avg]"], floatfmt=["", "f", ".0%"]))
         print()
 
     if save_dot or all:
@@ -179,6 +200,12 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
             g.nodes[u]["label"] = f"{name}\\n{time:.1f}s"
             g.nodes[u]["height"] = time
             g.nodes[u]["shape"] = "box"
+
+        for drv in crit_path:
+            g.nodes[drv]["color"] = "red"
+
+        for i in range(len(crit_path) - 1):
+            g[crit_path[i+1]][crit_path[i]]["color"] = "red"
 
         networkx.nx_pydot.write_dot(g, save_dot or DOTFILE)
 
