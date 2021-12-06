@@ -120,6 +120,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
                 # uhh, maybe I should really invert the graph...
                 preds = list(g.successors(drv))
                 if len(preds) == 1:
+                    g.nodes[preds[0]]["time"] += g.nodes[drv]["time"]
                     networkx.contracted_nodes(g, preds[0], drv, self_loops=False, copy=False)
                     del g.nodes[preds[0]]["contraction"]
 
@@ -129,6 +130,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
             if pat.search(drv):
                 succs = list(g.predecessors(drv))
                 if len(succs) == 1:
+                    g.nodes[succs[0]]["time"] += g.nodes[drv]["time"]
                     networkx.contracted_nodes(g, succs[0], drv, self_loops=False, copy=False)
                     del g.nodes[succs[0]]["contraction"]
 
