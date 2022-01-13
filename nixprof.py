@@ -74,18 +74,7 @@ def record(cmd, out):
 DOTFILE = "nixprof.dot"
 CHROMEFILE = "nixprof.trace_event"
 
-@nixprof.command()
-@click.option("-i", "--in", "input", default="nixprof.log", help="log input filename", type=click.File('r'))
-@click.option("-t", "--tred", help="remove transitive edges (can speed up and declutter dot graph display)", is_flag=True)
-@click.option("-p", "--print-crit-path", help="print critical (longest) path", is_flag=True)
-@click.option("-a", "--print-avg-crit", help="print average contribution to critical paths", is_flag=True)
-@click.option("-s", "--print-sim-times", help="print simulated build times by processor count up to optimal count", is_flag=True)
-@click.option("-d", "--save-dot", is_flag=False, flag_value=DOTFILE, help="write dot graph to file", type=click.File('w'))
-@click.option("-c", "--save-chrome-trace", is_flag=False, flag_value=CHROMEFILE, help="write `chrome://tracing`'s `trace_event` format to file. When combined with `-s`, also write simulated traces to files with processor count as suffix.")
-@click.option("--all", help="print all analyses, write all output files", is_flag=True)
-@click.option("--merge-into-pred", help="for each derivation with exactly one predecessor (dependency) and whose name matches the given regex, merge build time and dependents into that predecessor")
-@click.option("--merge-into-succ", help="for each derivation with exactly one successor (dependent) and whose name matches the given regex, merge build time and dependencies into that successor")
-def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, merge_into_pred, merge_into_succ):
+def parse(input):
     g = networkx.DiGraph(rankdir="BT")
     id_to_drv = {}
     for line in input.readlines():
@@ -101,6 +90,23 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
                 if drv := id_to_drv.get(entry["id"]):
                     g.nodes[drv]["stop"] = time
                     g.nodes[drv]["time"] = time - g.nodes[drv]["start"]
+
+    return (g, id_to_drv)
+
+@nixprof.command()
+@click.option("-i", "--in", "input", default="nixprof.log", help="log input filename", type=click.File('r'))
+@click.option("-t", "--tred", help="remove transitive edges (can speed up and declutter dot graph display)", is_flag=True)
+@click.option("-p", "--print-crit-path", help="print critical (longest) path", is_flag=True)
+@click.option("-a", "--print-avg-crit", help="print average contribution to critical paths", is_flag=True)
+@click.option("-s", "--print-sim-times", help="print simulated build times by processor count up to optimal count", is_flag=True)
+@click.option("-d", "--save-dot", is_flag=False, flag_value=DOTFILE, help="write dot graph to file", type=click.File('w'))
+@click.option("-c", "--save-chrome-trace", is_flag=False, flag_value=CHROMEFILE, help="write `chrome://tracing`'s `trace_event` format to file. When combined with `-s`, also write simulated traces to files with processor count as suffix.")
+@click.option("--all", help="print all analyses, write all output files", is_flag=True)
+@click.option("--merge-into-pred", help="for each derivation with exactly one predecessor (dependency) and whose name matches the given regex, merge build time and dependents into that predecessor")
+@click.option("--merge-into-succ", help="for each derivation with exactly one successor (dependent) and whose name matches the given regex, merge build time and dependencies into that successor")
+def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, merge_into_pred, merge_into_succ):
+    """Report various metrics of a recorded log."""
+    g, id_to_drv = parse(input)
 
     drv_data = json.loads(subprocess.run(["nix", "--experimental-features", "nix-command", "path-info", "--json", "--derivation"] + list(g), capture_output=True, check=True).stdout)
     for d in drv_data:
@@ -214,6 +220,31 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
     if save_chrome_trace or all:
         g_sim = simulate(g, max_nproc=None, keep_start=True)
         write_chrome_trace(g_sim, open(save_chrome_trace or CHROMEFILE, 'w'), crit_path)
+
+@nixprof.command()
+@click.argument("base", type=click.File('r'))
+@click.argument("curr", default="nixprof.log", type=click.File('r'))
+@click.option("-m", "--matching", help="report only derivations whose names match the given regex")
+def diff(base, curr, matching):
+    """Report timing differences between two recorded logs."""
+    base, _ = parse(base)
+    base = { base.nodes[drv]["drv_name"] : base.nodes[drv]["time"] for drv in base }
+    curr, _ = parse(curr)
+    curr = { curr.nodes[drv]["drv_name"] : curr.nodes[drv]["time"] for drv in curr }
+
+    drvs = set(base.keys()) | set(curr.keys())
+    if matching:
+        pat = re.compile(matching)
+        drvs = { drv for drv in drvs if pat.search(drv) }
+
+    diffs = [(curr.get(drv, 0) - base.get(drv, 0), drv) for drv in drvs]
+    diffs = [(d, d / base.get(drv, d), drv) for d, drv in diffs]
+    diffs.sort(key=lambda d: -abs(d[0]))
+    s = sum(d[0] for d in diffs)
+    diffs = [d for d in diffs if abs(d[0]) > 0.001]
+    diffs.append((s, s / sum(base[drv] for drv in base), "total"))
+    print(tabulate(diffs, headers=["diff [s]", "", "drv"], floatfmt=["+.3g", "+.1%"]))
+    print()
 
 if __name__ == '__main__':
     nixprof()
