@@ -104,7 +104,8 @@ def parse(input):
 @click.option("--all", help="print all analyses, write all output files", is_flag=True)
 @click.option("--merge-into-pred", help="for each derivation with exactly one predecessor (dependency) and whose name matches the given regex, merge build time and dependents into that predecessor")
 @click.option("--merge-into-succ", help="for each derivation with exactly one successor (dependent) and whose name matches the given regex, merge build time and dependencies into that successor")
-def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, merge_into_pred, merge_into_succ):
+@click.option("--filter")
+def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times, save_dot, save_chrome_trace, all, merge_into_pred, merge_into_succ, filter):
     """Report various metrics of a recorded log."""
     g, id_to_drv = parse(input)
 
@@ -149,7 +150,13 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
     for u, v, data in g.edges(data=True):
         data["time"] = g.nodes[u]["time"]
 
-    crit_path: List[str] = list(reversed(networkx.dag_longest_path(g, weight="time")))
+    global filter_fn
+    if filter:
+        pat = re.compile(filter)
+        filter_fn = lambda x: not pat.search(x)
+    else:
+        filter_fn = lambda x: True
+    crit_path: List[str] = [v for v in reversed(networkx.dag_longest_path(g, weight="time")) if filter_fn(v)]
     if print_crit_path or all:
         print("Critical path")
         max_time = sum([g.nodes[u]["time"] for u in crit_path])
@@ -167,7 +174,8 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
         for u in g.nodes:
             ug = networkx.subgraph(g, networkx.ancestors(g, u))
             for v in networkx.dag_longest_path(ug, weight="time"):
-                avg_contrib[v] += g.nodes[v]["time"] / len(g.nodes)
+                if filter_fn(v):
+                    avg_contrib[v] += g.nodes[v]["time"] / len(g.nodes)
 
         print("Average contribution to critical paths")
         total_contrib = sum(avg_contrib.values())
