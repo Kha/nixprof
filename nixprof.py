@@ -109,7 +109,7 @@ def report(input: TextIO, tred, print_crit_path, print_avg_crit, print_sim_times
     """Report various metrics of a recorded log."""
     g, id_to_drv = parse(input)
 
-    drv_data = json.loads(subprocess.run(["nix", "--experimental-features", "nix-command", "path-info", "--json", "--derivation"] + list(g), capture_output=True, check=True).stdout)
+    drv_data = json.loads(subprocess.run(["nix", "--extra-experimental-features", "nix-command", "path-info", "--json", "--derivation"] + list(g), capture_output=True, check=True).stdout)
     for d in drv_data:
         for dep in d["references"]:
             if dep in g:
